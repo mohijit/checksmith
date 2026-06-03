@@ -1,0 +1,55 @@
+[package]
+name = "checksmith"
+version = "0.1.0"
+edition = "2021"
+description = "A classical chess engine built from scratch in Rust."
+license = "MIT"
+
+# We expose both a library (the engine) and a thin binary (the driver / future UCI).
+# Keeping the engine in a library makes it trivial to unit/integration test.
+[lib]
+name = "checksmith"
+path = "src/lib.rs"
+
+[[bin]]
+name = "checksmith"
+path = "src/main.rs"
+
+# ── Criterion benchmarks ──────────────────────────────────────────────────────
+# Each [[bench]] entry maps to a file in benches/ and becomes a target for
+# `cargo bench`.  Harness = false is required when using criterion's own main.
+[[bench]]
+name = "perft"
+harness = false
+
+[[bench]]
+name = "search"
+harness = false
+
+[[bench]]
+name = "eval"
+harness = false
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
+[dependencies]
+rand = "0.8"
+
+[dev-dependencies]
+# criterion provides statistically rigorous microbenchmarks with outlier
+# detection, warmup, and wall-clock / cycle measurements.
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# ── Profiles ──────────────────────────────────────────────────────────────────
+
+# Release profile tuned for a search-heavy workload.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# Criterion runs under the `bench` profile.  Enable the same optimisations as
+# release so benchmarks reflect real performance, not debug throughput.
+[profile.bench]
+opt-level = 3
+lto = true
+codegen-units = 1

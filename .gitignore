@@ -1,0 +1,31 @@
+# Rust build output
+/target/
+
+# Trained network files (large binaries — share separately)
+*.nnue
+train/model/
+train/data/
+
+# Windows debug artifacts from poly tools
+*.exe
+*.pdb
+srcbookpoly_check.rs
+poly_diag*.rs
+
+# CuteChess pre-compiled Windows binaries (download separately from cutechess.com)
+tools/cutechess-1.4.0-win64/*.dll
+tools/cutechess-1.4.0-win64/platforms/
+tools/cutechess-1.4.0-win64/plugins/
+tools/cutechess-1.4.0-win64/styles/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Editor / OS
+.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db

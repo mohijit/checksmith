@@ -1,0 +1,8 @@
+[
+    {
+        "name": "Checksmith",
+        "command": "target/release/checksmith.exe",
+        "workingDirectory": "c:/Projects_New/Checksmith",
+        "protocol": "uci"
+    }
+]
