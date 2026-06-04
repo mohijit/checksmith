@@ -1,0 +1,24 @@
+Checksmith bench  depth=10  positions=15  hash=32MB
+
+  [ 1/15]  score    cp 52  nodes    385,749  bm e2e4
+  [ 2/15]  score    cp 16  nodes    281,669  bm a2a3
+  [ 3/15]  score    cp 92  nodes    725,193  bm d4f3
+  [ 4/15]  score    cp 17  nodes    893,241  bm e4e5
+  [ 5/15]  score    cp 91  nodes    463,136  bm a2a3
+  [ 6/15]  score   cp -81  nodes    686,454  bm c4d3
+  [ 7/15]  score   cp 809  nodes    154,634  bm g2g7
+  [ 8/15]  score  cp 1065  nodes    143,198  bm b6d6
+  [ 9/15]  score  cp -326  nodes     67,411  bm f3f4
+  [10/15]  score    cp 13  nodes    475,014  bm h7h6
+  [11/15]  score   cp 404  nodes    559,775  bm a7a5
+  [12/15]  score   cp 798  nodes     39,217  bm e3f3
+  [13/15]  score    cp 40  nodes      3,172  bm g2f3
+  [14/15]  score    cp 20  nodes     24,919  bm e3e4
+  [15/15]  score  cp -127  nodes    718,059  bm e2a6
+
+===========================
+Depth         : 10
+Total nodes   : 5,620,841
+Time          : 10.895s
+NPS           : 515,910
+===========================

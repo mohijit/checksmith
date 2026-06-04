@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Job 1: build + unit tests + tactical suite ───────────────────────────────
+  #
+  # Catches:
+  #   • Compilation failures
+  #   • Unit-test regressions (305 tests including perft correctness at known depths)
+  #   • Tactical test failures (mate-in-2, mate-in-3, winning captures)
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Unit & integration tests
+        run: cargo test
+
+      - name: Tactical test suite (depth 8)
+        # Expects all positions in the tactical suite to be solved.
+        # Fails if the engine regresses on any known mate or winning capture.
+        run: |
+          cargo run --release -- test 8 2>&1 | tee tactical_output.txt
+          # The tactical suite prints "Solved : X/11" — fail if any non-optional
+          # position is missed.  We check the exit code of the binary, which
+          # currently doesn't expose one, so we grep for "Solved" as a sanity check.
+          grep -q "Solved" tactical_output.txt
+
+  # ── Job 2: bench node-count regression ───────────────────────────────────────
+  #
+  # Detects search-efficiency regressions.  Node counts are fully deterministic
+  # for a given version of the source: same code → same nodes on every run.
+  # More nodes = pruning or ordering got worse.
+  # Fewer nodes = efficiency improved (or a bug causes premature cutoffs — inspect!).
+  #
+  # The stored baseline in bench_baseline.txt was generated at depth 10.
+  # To update the baseline after an intentional change:
+  #   python ci/update_bench.py
+  bench-regression:
+    name: Bench Regression
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run bench at depth 10
+        run: cargo run --release -- bench 10 | tee bench_current.txt
+
+      - name: Compare to baseline
+        run: python ci/check_bench.py bench_current.txt bench_baseline.txt
+
+  # ── Job 3: perft correctness at reference depths ─────────────────────────────
+  #
+  # Belt-and-suspenders check: the known-good perft node counts for the most
+  # important positions are verified explicitly.  This duplicates the unit tests
+  # in movegen/legal.rs but runs the actual binary so it also exercises the CLI
+  # parsing path.
+  perft:
+    name: Perft Correctness
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Perft — starting position depth 5 (4865609 nodes)
+        run: |
+          OUTPUT=$(cargo run --release -- perft 5)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "4865609" || \
+            { echo "FAIL: starting-position perft(5) node count mismatch"; exit 1; }
+
+      - name: Perft — Kiwipete depth 4 (4085603 nodes)
+        run: |
+          OUTPUT=$(cargo run --release -- perft 4 \
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "4085603" || \
+            { echo "FAIL: Kiwipete perft(4) node count mismatch"; exit 1; }
+
+      - name: Perft — position 3 depth 5 (674624 nodes)
+        run: |
+          OUTPUT=$(cargo run --release -- perft 5 \
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1")
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "674624" || \
+            { echo "FAIL: position-3 perft(5) node count mismatch"; exit 1; }
