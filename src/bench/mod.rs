@@ -87,7 +87,10 @@
 //! move-generation got slower.
 
 use crate::board::Board;
-use crate::search::{is_mate_score, search};
+use crate::search::{is_mate_score, search, think, SearchLimits, TranspositionTable};
+use crate::search::thread_pool::SearchPool;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 // ─── Standard bench positions ─────────────────────────────────────────────────
@@ -364,6 +367,129 @@ pub fn run_test(args: &[String]) {
     let max_depth: u32 = args.first().and_then(|s| s.parse().ok()).unwrap_or(8);
     let result = run_tactical(max_depth);
     println!("{}", result);
+}
+
+/// `checksmith smp-bench [depth]`
+///
+/// Runs the standard bench positions at `depth` with 1, 2, 4, and 8 threads
+/// (capped at the hardware thread count), then prints an SMP scaling table so
+/// you can verify the Lazy SMP implementation is actually yielding a speedup.
+///
+/// ## Example output
+///
+/// ```text
+/// Checksmith SMP scaling benchmark  depth=8  positions=15  hardware_threads=8
+///
+/// Threads  Total nodes    Time(s)   NPS(Mnps)  Scaling    Efficiency
+///       1  12,345,678      5.123       2.41       1.00x         —
+///       2  12,578,234      2.701       4.66       1.93x       96.7%
+///       4  12,634,890      1.412       8.95       3.71x       92.8%
+///       8  12,712,345      0.834      15.24       6.32x       79.0%
+/// ```
+pub fn run_smp_bench_command(args: &[String]) {
+    let depth: u32 = args.first().and_then(|s| s.parse().ok()).unwrap_or(8);
+    run_smp_bench(depth);
+}
+
+/// Run the SMP scaling benchmark across thread counts 1, 2, 4, 8 (capped at
+/// hardware concurrency) and print a formatted table.
+pub fn run_smp_bench(depth: u32) {
+    let hw_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    // Always include 1; add powers of two up to hw_threads.
+    let mut thread_counts: Vec<usize> = vec![1];
+    let mut t = 2;
+    while t <= hw_threads {
+        thread_counts.push(t);
+        t *= 2;
+    }
+    if *thread_counts.last().unwrap() != hw_threads && hw_threads > 1 {
+        thread_counts.push(hw_threads);
+    }
+
+    println!(
+        "Checksmith SMP scaling benchmark  depth={}  positions={}  hardware_threads={}",
+        depth,
+        BENCH_POSITIONS.len(),
+        hw_threads,
+    );
+    println!();
+    println!(
+        "{:>7}  {:>14}  {:>8}  {:>10}  {:>8}  {:>10}",
+        "Threads", "Total nodes", "Time(s)", "NPS(Mnps)", "Scaling", "Efficiency"
+    );
+
+    let mut baseline_nps = 0u64;
+
+    for &n in &thread_counts {
+        let result = bench_with_threads(depth, n);
+        let nps = result.nps();
+        if n == 1 {
+            baseline_nps = nps.max(1);
+        }
+        let scaling = nps as f64 / baseline_nps as f64;
+        let efficiency = scaling / n as f64 * 100.0;
+
+        let eff_str = if n == 1 {
+            "        —".to_string()
+        } else {
+            format!("{:>9.1}%", efficiency)
+        };
+
+        println!(
+            "{:>7}  {:>14}  {:>8.3}  {:>10.2}  {:>7.2}x  {}",
+            n,
+            fmt_nodes(result.total_nodes),
+            result.elapsed_ms as f64 / 1000.0,
+            nps as f64 / 1_000_000.0,
+            scaling,
+            eff_str,
+        );
+    }
+    println!();
+}
+
+/// Run the bench positions at `depth` using `n_threads` (1 main + n-1 helpers).
+///
+/// Returns the aggregate [`BenchResult`] for the thread count.
+pub fn bench_with_threads(depth: u32, n_threads: usize) -> BenchResult {
+    let tt = Arc::new(TranspositionTable::new(32));
+    let pool = SearchPool::new(n_threads.saturating_sub(1));
+
+    let start = Instant::now();
+    let mut total_nodes = 0u64;
+
+    for &fen in BENCH_POSITIONS {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut board = Board::from_fen(fen).expect("valid bench FEN");
+
+        tt.new_generation();
+
+        // Dispatch helpers before the main (depth-limited) search.
+        if pool.len() > 0 {
+            pool.start_helpers(&board, Arc::clone(&stop), Arc::clone(&tt), &[], None);
+        }
+
+        let limits = SearchLimits { depth: Some(depth), ..Default::default() };
+        let result = think(&mut board, &limits, Arc::clone(&stop), &tt, &[], None, |_| {});
+
+        // Signal helpers to stop; they will return within a few ms.
+        stop.store(true, Ordering::Relaxed);
+        total_nodes += result.nodes;
+    }
+
+    // Give helpers a moment to notice the last stop flag before the pool is
+    // dropped (Drop sends Quit + joins, so cleanup is always correct, but
+    // the brief pause avoids a long join when the flag was just set).
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    BenchResult {
+        depth,
+        total_nodes,
+        elapsed_ms: start.elapsed().as_millis(),
+    }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

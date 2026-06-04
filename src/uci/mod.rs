@@ -65,8 +65,9 @@ use crate::book::OpeningBook;
 use crate::movegen::Move;
 use crate::nnue::network::Network;
 use crate::search::{
-    is_mate_score, mate_distance_plies, smp, think, SearchInfo, SearchLimits, TranspositionTable,
+    is_mate_score, mate_distance_plies, think, SearchInfo, SearchLimits, TranspositionTable,
 };
+use crate::search::thread_pool::SearchPool;
 use crate::tablebase;
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -110,6 +111,15 @@ struct Engine {
     /// Shared transposition table. Wrapped in `Arc` so search threads can hold
     /// a clone without the main thread losing ownership.
     tt: Arc<TranspositionTable>,
+
+    /// Persistent pool of Lazy SMP helper threads.
+    ///
+    /// Holds `num_threads - 1` workers, each waiting on an `mpsc` channel.
+    /// `start_search` dispatches helper searches via `pool.start_helpers()`
+    /// before launching the main search thread.  Workers stop automatically
+    /// when the main search sets the shared stop flag and re-enter their wait
+    /// loop, ready for the next search — no per-search spawn/join overhead.
+    pool: SearchPool,
 
     // ── Tunable options ────────────────────────────────────────────────────
     /// Milliseconds subtracted from the clock each move to cover GUI overhead.
@@ -155,6 +165,7 @@ impl Engine {
             stop:  Arc::new(AtomicBool::new(false)),
             search: None,
             tt:     Arc::new(TranspositionTable::new(DEFAULT_HASH_MB)),
+            pool:   SearchPool::new(0), // 1 thread = 0 helpers; resized on setoption Threads
             move_overhead_ms: DEFAULT_OVERHEAD_MS,
             num_threads: 1,
             multi_pv: 1,
@@ -364,6 +375,8 @@ impl Engine {
                     .unwrap_or(1)
                     .max(1);
                 self.num_threads = n.clamp(1, max);
+                // Resize the persistent helper pool: main thread + (N-1) helpers.
+                self.pool.resize(self.num_threads.saturating_sub(1));
             }
         } else if name.eq_ignore_ascii_case("Ponder") {
             self.ponder_enabled = value.eq_ignore_ascii_case("true");
@@ -441,10 +454,22 @@ impl Engine {
         let stop = self.stop.clone();
         let game_history = self.game_history.clone();
         let tt = Arc::clone(&self.tt);
-        let num_threads = self.num_threads;
         let nnue = self.nnue_network.as_ref().map(Arc::clone);
 
         self.tt.new_generation();
+
+        // Dispatch helper searches to the persistent thread pool before the
+        // main search starts.  Helpers fill the shared TT with speculative
+        // results; they stop automatically when stop is set to true.
+        if self.pool.len() > 0 {
+            self.pool.start_helpers(
+                &board,
+                Arc::clone(&stop),
+                Arc::clone(&tt),
+                &game_history,
+                nnue.as_ref().map(Arc::clone),
+            );
+        }
 
         let builder = thread::Builder::new().stack_size(16 * 1024 * 1024);
         self.search = Some(
@@ -458,7 +483,6 @@ impl Engine {
                         game_history,
                         multi_pv,
                         ponder_enabled,
-                        num_threads,
                         nnue,
                     );
                 })
@@ -497,19 +521,13 @@ fn run_search_thread(
     game_history:   Vec<u64>,
     multi_pv:       usize,
     ponder_enabled: bool,
-    num_threads:    usize,
     nnue:           Option<Arc<Network>>,
 ) {
     let multi_pv = multi_pv.max(1);
 
-    // Spawn Lazy SMP helpers (num_threads - 1 extra threads).
-    // They all share `tt` and stop when we set the stop flag.
-    let helper_count = num_threads.saturating_sub(1);
-    let helpers = if helper_count > 0 {
-        smp::spawn_helpers(&board, Arc::clone(&stop), Arc::clone(&tt), &game_history, helper_count, nnue.as_ref().map(Arc::clone))
-    } else {
-        Vec::new()
-    };
+    // Helper threads are managed by the persistent SearchPool in Engine and
+    // were already dispatched before this function was called.  We only need
+    // to run the main (timed) search here.
 
     let mut excluded: Vec<Move> = Vec::new();
     let mut first_best_move: Option<Move> = None;
@@ -546,12 +564,9 @@ fn run_search_thread(
         }
     }
 
-    // Signal helpers to stop (they may still be running if the main search
-    // ended via soft limit rather than an external stop command).
+    // Signal helpers to stop.  Pool workers poll the stop flag every ~4096
+    // nodes and will return to their wait loop within a few milliseconds.
     stop.store(true, Ordering::Relaxed);
-    for h in helpers {
-        let _ = h.join();
-    }
 
     // Emit `bestmove`, optionally followed by a ponder hint.
     let best_str = first_best_move

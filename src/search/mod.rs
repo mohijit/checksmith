@@ -24,6 +24,7 @@ pub mod params;
 pub mod quiescence;
 pub mod see;
 pub mod smp;
+pub mod thread_pool;
 pub mod time;
 pub mod tt;
 
