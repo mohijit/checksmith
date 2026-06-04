@@ -1,0 +1,81 @@
+name: Release
+
+# Triggered by pushing a version tag: git tag v0.9.0 && git push --tags
+# Builds static binaries for Linux (musl) and Windows (MSVC), then publishes
+# them as a GitHub Release with auto-generated release notes.
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write   # required to create the GitHub Release
+
+jobs:
+  build:
+    name: Build — ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Fully static Linux binary: no glibc dependency, runs on any x86_64 distro.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary_name: checksmith
+            artifact_suffix: linux-x86_64
+
+          # Windows binary: pure-Rust Cargo build is already self-contained.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: checksmith.exe
+            artifact_suffix: windows-x86_64.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust + target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo registry + build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install musl-tools (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y musl-tools
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Rename the binary to checksmith-<version>-<platform> so all uploads
+      # land in the same release without colliding.
+      - name: Rename binary (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" \
+             "checksmith-${VERSION}-${{ matrix.artifact_suffix }}"
+
+      - name: Rename binary (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" \
+             "checksmith-${VERSION}-${{ matrix.artifact_suffix }}"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: checksmith-*
+          generate_release_notes: true
+          # Release name: "Checksmith v0.9.0"
+          name: "Checksmith ${{ github.ref_name }}"

@@ -5,6 +5,7 @@
 //!
 //!   checksmith                              # enter the UCI loop (default)
 //!   checksmith uci                          # enter the UCI loop
+//!   checksmith --version                    # print version and exit
 //!   checksmith show [<fen>]                 # print a position
 //!   checksmith perft <depth> [<fen>]        # run a perft divide
 //!   checksmith go <depth> [<fen>]           # fixed-depth search, print best move
@@ -29,6 +30,9 @@ fn main() {
 
     match args.get(1).map(String::as_str) {
         None | Some("uci") => checksmith::uci::run(),
+        Some("--version") | Some("-V") => {
+            println!("checksmith {}", env!("CARGO_PKG_VERSION"));
+        }
         Some("perft")   => run_perft(&args[2..]),
         Some("go")      => run_search(&args[2..]),
         Some("show")    => run_show(&args[2..]),

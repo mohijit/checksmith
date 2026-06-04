@@ -1,6 +1,6 @@
 [package]
 name = "checksmith"
-version = "0.1.0"
+version = "0.9.0"
 edition = "2021"
 description = "A classical chess engine built from scratch in Rust."
 license = "MIT"
