@@ -364,6 +364,11 @@ impl<E: Evaluator> Searcher<E> {
         skip_null: bool,
         tt: &TranspositionTable,
     ) -> i32 {
+        // Warm the TT cache line for this node before any other work.
+        // The prefetch is issued early so the cluster is in L1 by the time
+        // we probe the TT a few instructions later.
+        tt.prefetch(board.hash);
+
         if self.nodes & 4095 == 0 && self.should_stop() {
             return 0;
         }

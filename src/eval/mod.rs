@@ -18,6 +18,9 @@
 //! | Outposts — knight/bishop on a square enemy pawns can't challenge | [`outpost_bonus`] |
 //! | Rook on open / semi-open files | [`rook_activity`] |
 //! | Rook on the 7th rank | [`rook_activity`] |
+//! | Threats — lower-value piece attacks higher-value enemy piece | [`threats`] |
+//! | Space — pawns advanced past the 4th rank on centre files | [`space`] |
+//! | Trapped pieces — bishop with limited mobility, knight on a/h file | [`trapped_pieces`] |
 //!
 //! ## The one invariant: perspective
 //!
@@ -111,6 +114,22 @@ const MOPUP_THRESHOLD_CP: i32 = 400; // roughly a rook up
 const MOPUP_ENEMY_CORNER: i32 = 4;   // per Manhattan-distance unit from centre
 const MOPUP_KING_APPROACH: i32 = 2;  // per step closer (max 7 steps)
 
+// Threats: bonus when our lower-value piece attacks an enemy higher-value piece.
+const THREAT_PAWN_VS_MINOR:  Score = Score::new(35, 25);
+const THREAT_PAWN_VS_ROOK:   Score = Score::new(45, 25);
+const THREAT_PAWN_VS_QUEEN:  Score = Score::new(55, 30);
+const THREAT_MINOR_VS_ROOK:  Score = Score::new(20, 15);
+const THREAT_MINOR_VS_QUEEN: Score = Score::new(25, 20);
+const THREAT_ROOK_VS_QUEEN:  Score = Score::new(15, 15);
+
+// Space: per own pawn that has advanced past the 4th rank on centre files (b–g).
+const SPACE_ADVANCED_PAWN: Score = Score::new(4, 0);
+
+// Trapped pieces.
+const TRAPPED_BISHOP_FULL: Score = Score::new(-50, -50); // 0 safe squares to move to
+const TRAPPED_BISHOP_PART: Score = Score::new(-25, -25); // 1 safe square
+const KNIGHT_ON_RIM:       Score = Score::new(-15, -10); // stranded on a or h file
+
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 /// Static evaluation in centipawns, from the perspective of the side to move.
@@ -142,6 +161,9 @@ pub fn evaluate(board: &Board) -> i32 {
     score += bad_bishop(board);
     score += outpost_bonus(board);
     score += rook_activity(board);
+    score += threats(board);
+    score += space(board);
+    score += trapped_pieces(board);
 
     let centipawns = taper(score, phase);
 
@@ -418,6 +440,100 @@ fn rook_activity(board: &Board) -> Score {
     })
 }
 
+/// Threats: bonus when our lower-value pieces attack enemy higher-value pieces.
+///
+/// Rewards forcing the opponent to lose tempo defending or conceding material.
+/// Each threat type is weighted by the material imbalance it creates.
+fn threats(board: &Board) -> Score {
+    both_sides(board, |board, color| {
+        let enemy = color.opposite();
+        let occ   = board.occupancy();
+        let mut s = Score::ZERO;
+
+        // Squares attacked by our pawns.
+        let mut pawn_atk = Bitboard::EMPTY;
+        for sq in board.pieces_colored(color, PieceType::Pawn) {
+            pawn_atk |= pawn_attacks(color, sq);
+        }
+
+        // Squares attacked by our minor pieces.
+        let mut minor_atk = Bitboard::EMPTY;
+        for sq in board.pieces_colored(color, PieceType::Knight) {
+            minor_atk |= knight_attacks(sq);
+        }
+        for sq in board.pieces_colored(color, PieceType::Bishop) {
+            minor_atk |= bishop_attacks(sq, occ);
+        }
+
+        // Squares attacked by our rooks.
+        let mut rook_atk = Bitboard::EMPTY;
+        for sq in board.pieces_colored(color, PieceType::Rook) {
+            rook_atk |= rook_attacks(sq, occ);
+        }
+
+        let enemy_minor = board.pieces_colored(enemy, PieceType::Knight)
+                        | board.pieces_colored(enemy, PieceType::Bishop);
+        let enemy_rook  = board.pieces_colored(enemy, PieceType::Rook);
+        let enemy_queen = board.pieces_colored(enemy, PieceType::Queen);
+
+        s += THREAT_PAWN_VS_MINOR  * (pawn_atk  & enemy_minor).count() as i32;
+        s += THREAT_PAWN_VS_ROOK   * (pawn_atk  & enemy_rook ).count() as i32;
+        s += THREAT_PAWN_VS_QUEEN  * (pawn_atk  & enemy_queen).count() as i32;
+        s += THREAT_MINOR_VS_ROOK  * (minor_atk & enemy_rook ).count() as i32;
+        s += THREAT_MINOR_VS_QUEEN * (minor_atk & enemy_queen).count() as i32;
+        s += THREAT_ROOK_VS_QUEEN  * (rook_atk  & enemy_queen).count() as i32;
+
+        s
+    })
+}
+
+/// Space: bonus per own pawn advanced past the 4th rank on centre files (b–g).
+///
+/// Advanced centre pawns claim territory and restrict enemy piece activity.
+/// The bonus is purely a middlegame concern (vanishes in the endgame).
+fn space(board: &Board) -> Score {
+    both_sides(board, |board, color| {
+        let count = board
+            .pieces_colored(color, PieceType::Pawn)
+            .filter(|&sq| {
+                let file = sq.file();
+                let rel  = match color {
+                    Color::White => sq.rank(),
+                    Color::Black => 7 - sq.rank(),
+                };
+                file >= 1 && file <= 6 && rel >= 4
+            })
+            .count() as i32;
+        SPACE_ADVANCED_PAWN * count
+    })
+}
+
+/// Trapped pieces: penalty for bishops with no safe squares, and knights
+/// stranded on the a or h file where their mobility is severely curtailed.
+fn trapped_pieces(board: &Board) -> Score {
+    both_sides(board, |board, color| {
+        let occ = board.occupancy();
+        let own = board.color(color);
+        let mut s = Score::ZERO;
+
+        for sq in board.pieces_colored(color, PieceType::Bishop) {
+            match (bishop_attacks(sq, occ) & !own).count() {
+                0 => s += TRAPPED_BISHOP_FULL,
+                1 => s += TRAPPED_BISHOP_PART,
+                _ => {}
+            }
+        }
+
+        for sq in board.pieces_colored(color, PieceType::Knight) {
+            if sq.file() == 0 || sq.file() == 7 {
+                s += KNIGHT_ON_RIM;
+            }
+        }
+
+        s
+    })
+}
+
 /// Endgame mop-up and king-activity evaluation.
 ///
 /// Applied *after* the main tapered score so it can be conditioned on the
@@ -585,6 +701,45 @@ mod tests {
             evaluate(&close) > evaluate(&far),
             "winning king closer to enemy king should score better (mop-up)"
         );
+    }
+
+    #[test]
+    fn threats_pawn_attacks_minor_rewards_attacker() {
+        // White pawn on e5 attacks d6/f6; Black knight on d6 = threatened.
+        let threat    = Board::from_fen("4k3/8/3n4/4P3/8/8/8/4K3 w - - 0 1").unwrap();
+        // Same but Black knight on c6 — not attacked by the pawn.
+        let no_threat = Board::from_fen("4k3/8/2n5/4P3/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(evaluate(&threat) > evaluate(&no_threat),
+                "pawn attacking enemy minor should score higher for the attacker");
+    }
+
+    #[test]
+    fn space_advanced_centre_pawn_is_rewarded() {
+        // White pawn on e5 (advanced, centre file) vs e2 (home rank).
+        let advanced     = Board::from_fen("4k3/8/8/4P3/8/8/8/4K3 w - - 0 1").unwrap();
+        let not_advanced = Board::from_fen("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1").unwrap();
+        assert!(evaluate(&advanced) > evaluate(&not_advanced),
+                "advanced centre pawn should score higher");
+    }
+
+    #[test]
+    fn trapped_bishop_is_penalized() {
+        // Bishop on a1 with own pawn on b2: zero escape squares.
+        let trapped = Board::from_fen("4k3/8/8/8/8/8/1P6/B3K3 w - - 0 1").unwrap();
+        // Bishop on d5 with open diagonals.
+        let free    = Board::from_fen("4k3/8/8/3B4/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(evaluate(&free) > evaluate(&trapped),
+                "trapped bishop (zero mobility) should score lower");
+    }
+
+    #[test]
+    fn knight_on_rim_is_penalized() {
+        // White knight on a4 (a-file — rim).
+        let rim    = Board::from_fen("4k3/8/8/8/N7/8/8/4K3 w - - 0 1").unwrap();
+        // White knight on d5 (central square).
+        let center = Board::from_fen("4k3/8/8/3N4/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(evaluate(&center) > evaluate(&rim),
+                "knight on the a-file rim should score lower");
     }
 
     #[test]
