@@ -10,6 +10,7 @@
 //!   checksmith go <depth> [<fen>]           # fixed-depth search, print best move
 //!   checksmith bench [depth]                # node-count benchmark (default depth 10)
 //!   checksmith test  [max-depth]            # tactical test suite (default depth 8)
+//!   checksmith epd <file.epd> [depth]       # run an EPD test suite (default depth 8)
 //!   checksmith nps                          # quick perft-5 NPS measurement
 //!   checksmith verify [depth]               # search correctness verifier (default depth 5)
 //!   checksmith match [games] [depth]        # internal self-play regression match
@@ -31,6 +32,7 @@ fn main() {
         Some("show")    => run_show(&args[2..]),
         Some("bench")   => checksmith::bench::run(&args[2..]),
         Some("test")    => checksmith::bench::run_test(&args[2..]),
+        Some("epd")     => checksmith::epd::run_epd_command(&args[2..]),
         Some("nps")     => {
             let nps = checksmith::bench::measure_nps();
             println!("NPS: {} ({:.1} Mnps)", nps, nps as f64 / 1_000_000.0);

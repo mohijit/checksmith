@@ -10,6 +10,7 @@ pub mod bench;
 pub mod board;
 pub mod book;
 pub mod debug;
+pub mod epd;
 pub mod eval;
 pub mod movegen;
 pub mod nnue;
