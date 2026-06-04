@@ -84,6 +84,18 @@
 //! the node immediately.  This is especially powerful at depths ≥ 5 where
 //! it replaces many expensive sub-trees with a cheap scout.
 //!
+//! ## Singular Extensions
+//!
+//! Before searching the TT move at a node, verify whether it is the *only*
+//! good move: search all other moves at half depth with a narrow window
+//! centred below `tt_score − margin`.  If they all fail low, the TT move
+//! is "singular" and earns one extra ply of search depth.  This prevents
+//! the horizon from cutting off forced sequences prematurely.
+//!
+//! **Conditions:** `depth ≥ 6`, TT has a lower/exact bound at `depth − 3` or
+//! more, the stored score is not a mate score, and we are not already inside
+//! an SE verification call.
+//!
 //! ## Transposition table
 //!
 //! Every node probes the [`TranspositionTable`]: a deep-enough stored result
@@ -151,6 +163,15 @@ const PROBCUT_MARGIN: i32 = 200;
 /// Depth reduction for the ProbCut verification search.
 const PROBCUT_REDUCTION: u32 = 4;
 
+// --- Singular Extensions ------------------------------------------------
+
+/// Minimum depth at which a singular extension is considered.
+const SE_MIN_DEPTH: u32 = 6;
+
+/// Singular beta per ply: s_beta = tt_score − SE_DEPTH_FACTOR × depth.
+/// Smaller values → fewer (more conservative) extensions.
+const SE_DEPTH_FACTOR: i32 = 6;
+
 // -------------------------------------------------------------------------
 
 /// The outcome of a search.
@@ -194,6 +215,8 @@ pub struct Searcher<E: Evaluator = HandcraftedEvaluator> {
     pub tt_cutoffs: u64,
     /// Nodes where the position was in check and depth was extended by 1.
     pub check_extensions: u64,
+    /// TT moves verified singular and extended by 1 ply.
+    pub singular_extensions: u64,
 
     pub(crate) evaluator: E,
     killers: Killers,
@@ -207,6 +230,10 @@ pub struct Searcher<E: Evaluator = HandcraftedEvaluator> {
     pub cont_hist_2: ContinuationHistory,
     /// Stores the quiet move that most recently refuted each predecessor move.
     counter_moves: CounterMoves,
+    /// Per-ply move excluded from the move loop during an SE verification search.
+    /// Set to `Some(mv)` just before the recursive SE call; cleared afterward.
+    /// Also used as a re-entry guard: SE is not attempted when this is `Some`.
+    se_excluded: [Option<Move>; MAX_PLY],
     deadline: Option<Instant>,
     stop: Arc<AtomicBool>,
     node_limit: Option<u64>,
@@ -252,6 +279,7 @@ impl<E: Evaluator> Searcher<E> {
             tt_hits: 0,
             tt_cutoffs: 0,
             check_extensions: 0,
+            singular_extensions: 0,
             evaluator,
             killers: Killers::new(),
             history: History::new(),
@@ -259,6 +287,7 @@ impl<E: Evaluator> Searcher<E> {
             cont_hist_1: ContinuationHistory::new(),
             cont_hist_2: ContinuationHistory::new(),
             counter_moves: CounterMoves::new(),
+            se_excluded: [None; MAX_PLY],
             deadline,
             stop,
             node_limit,
@@ -463,13 +492,23 @@ impl<E: Evaluator> Searcher<E> {
 
         let alpha_orig = alpha;
 
+        // True when this call is the verification search for a singular extension.
+        // In that case we must not take TT cutoffs (the stored result was computed
+        // without the move exclusion and would be wrong here).
+        let is_se_search = self.se_excluded[ply as usize].is_some();
+
         // --- Transposition-table probe ---
         let mut tt_move = None;
+        // (score, depth, bound) saved for the SE check later in the move loop.
+        let mut tt_data_se: Option<(i32, u8, Bound)> = None;
         if let Some(data) = tt.probe(board.hash) {
             self.tt_hits += 1;
             tt_move = data.best_move();
-            if data.depth as u32 >= depth {
-                let s = score_from_tt(data.score, ply);
+            let s = score_from_tt(data.score, ply);
+            tt_data_se = Some((s, data.depth, data.bound));
+            // Skip TT cutoffs inside an SE search; they were stored without the
+            // current move exclusion and would corrupt the verification score.
+            if data.depth as u32 >= depth && !is_se_search {
                 match data.bound {
                     Bound::Exact => { self.tt_cutoffs += 1; return s; }
                     Bound::Lower if s >= beta  => { self.tt_cutoffs += 1; return s; }
@@ -649,6 +688,9 @@ impl<E: Evaluator> Searcher<E> {
             select_next(slice, &mut scores, i);
             let mv = slice[i];
 
+            // Skip the move excluded during a singular extension verification.
+            if self.se_excluded[ply as usize] == Some(mv) { continue; }
+
             // Futility pruning: at depth 1-2, skip quiet moves that can't
             // possibly raise alpha even with an optimistic static eval bump.
             // Always search at least one move (i > 0 guard) and skip only if
@@ -678,6 +720,43 @@ impl<E: Evaluator> Searcher<E> {
                 continue;
             }
 
+            // --- Singular Extension ---
+            //
+            // For the TT move at sufficient depth: verify it is the *only* move
+            // that scores above a threshold by searching all other moves at
+            // half depth in a narrow window.  If they all fail low, this move
+            // is "singular" — extend it one extra ply.
+            //
+            // Guard: not already inside an SE search (`is_se_search`) to
+            // prevent recursive singularity checks.
+            let mut extension = 0u32;
+            if tt_move == Some(mv)
+                && depth >= SE_MIN_DEPTH
+                && !is_se_search
+            {
+                if let Some((tt_sc, tt_d, tt_b)) = tt_data_se {
+                    if (tt_b == Bound::Lower || tt_b == Bound::Exact)
+                        && tt_d as u32 >= depth.saturating_sub(3)
+                        && tt_sc.abs() < MATE_IN_MAX
+                    {
+                        let s_beta = (tt_sc - SE_DEPTH_FACTOR * depth as i32)
+                            .max(-MATE_IN_MAX + 1);
+                        let se_depth = depth / 2;
+                        // Exclude this move and recurse on the same board/ply.
+                        self.se_excluded[ply as usize] = Some(mv);
+                        let se_score = self.negamax(
+                            board, se_depth, s_beta - 1, s_beta, ply, true, tt,
+                        );
+                        self.se_excluded[ply as usize] = None;
+                        if self.stopped { return 0; }
+                        if se_score < s_beta {
+                            extension = 1;
+                            self.singular_extensions += 1;
+                        }
+                    }
+                }
+            }
+
             // Record the move at this ply so the child can look up continuation
             // history for its own ordering and history updates.
             self.move_stack[ply as usize] = Some(mv);
@@ -685,8 +764,9 @@ impl<E: Evaluator> Searcher<E> {
             let undo = board.make_move(mv);
 
             let score = if i == 0 {
-                // First move: full window, no reduction — this is the expected best move.
-                -self.negamax(board, depth - 1, -beta, -alpha, ply + 1, false, tt)
+                // First move: full window, no reduction.  Apply singular extension
+                // if this move was verified as the only good option at this node.
+                -self.negamax(board, depth - 1 + extension, -beta, -alpha, ply + 1, false, tt)
             } else {
                 // --- Late Move Reductions ---
                 //
@@ -852,6 +932,12 @@ impl<E: Evaluator> Searcher<E> {
     pub fn check_extension_rate(&self) -> f64 {
         if self.nodes == 0 { return 0.0; }
         self.check_extensions as f64 / self.nodes as f64
+    }
+
+    /// Fraction of interior nodes where a singular extension fired.
+    pub fn singular_extension_rate(&self) -> f64 {
+        if self.nodes == 0 { return 0.0; }
+        self.singular_extensions as f64 / self.nodes as f64
     }
 }
 
@@ -1097,6 +1183,47 @@ mod tests {
             result.best_move.map(|m| m.to_uci()),
             Some("d1d8".to_string()),
             "NMP must not corrupt the obvious best move"
+        );
+    }
+
+    // ── Singular extension tests ──────────────────────────────────────────────
+
+    #[test]
+    fn singular_extension_counter_fires_at_sufficient_depth() {
+        // SE requires TT data from a prior iteration to know the expected score
+        // for the node.  Simulate iterative deepening by doing a depth-5 warmup
+        // pass (which populates the TT), then a depth-7 pass on the same TT.
+        let mut board = Board::from_fen(
+            "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
+        )
+        .unwrap();
+        let tt = TranspositionTable::new(4);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // Warmup: populate TT so the deeper pass has data to check singularity.
+        let mut warmup = Searcher::new(None, Arc::clone(&stop), None, HandcraftedEvaluator);
+        warmup.search_root(&mut board, 5, None, &tt, &[], -INFINITY, INFINITY);
+
+        // Deep pass: SE can now find TT entries with sufficient depth.
+        tt.new_generation();
+        let mut s = Searcher::new(None, stop, None, HandcraftedEvaluator);
+        s.search_root(&mut board, 7, None, &tt, &[], -INFINITY, INFINITY);
+        assert!(
+            s.singular_extensions > 0,
+            "expected at least one singular extension at depth 7 after TT warmup"
+        );
+    }
+
+    #[test]
+    fn singular_extension_does_not_change_obvious_best_move() {
+        // The best move in a clearly won position must be the same with or
+        // without the SE counter incrementing — correctness check.
+        let mut board = Board::from_fen("3q1k2/8/8/8/8/8/8/3Q2K1 w - - 0 1").unwrap();
+        let result = search(&mut board, 7);
+        assert_eq!(
+            result.best_move.map(|m| m.to_uci()),
+            Some("d1d8".to_string()),
+            "SE must not corrupt the obvious best move"
         );
     }
 
