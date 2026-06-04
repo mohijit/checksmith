@@ -82,6 +82,8 @@ pub struct SearchInfo {
     pub time_ms: u128,
     /// How full the transposition table is, in permille (0..=1000).
     pub hashfull: u32,
+    /// Number of successful WDL tablebase probes this depth.
+    pub tbhits: u64,
     /// Principal variation: the line the engine expects, walked out of the TT.
     pub pv: Vec<Move>,
     /// For MultiPV: which line this is (1 = best, 2 = second-best, …).
@@ -227,6 +229,7 @@ pub fn think(
             nodes: searcher.nodes,
             time_ms: start.elapsed().as_millis(),
             hashfull: tt.hashfull(),
+            tbhits: searcher.tb_hits,
             pv: extract_pv(board, tt, depth as usize),
             multipv: 1,
         });

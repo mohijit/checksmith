@@ -67,6 +67,7 @@ use crate::nnue::network::Network;
 use crate::search::{
     is_mate_score, mate_distance_plies, smp, think, SearchInfo, SearchLimits, TranspositionTable,
 };
+use crate::tablebase;
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -90,6 +91,10 @@ const MAX_MULTIPV: usize = 500;
 
 const DEFAULT_OWN_BOOK: bool  = true;
 const DEFAULT_BOOK_FILE: &str = "";
+
+const DEFAULT_SYZYGY_PIECES: u32 = 6;
+const MIN_SYZYGY_PIECES: u32     = 3;
+const MAX_SYZYGY_PIECES: u32     = 7;
 
 // ── Engine state ──────────────────────────────────────────────────────────────
 
@@ -228,6 +233,11 @@ impl Engine {
             if DEFAULT_BOOK_FILE.is_empty() { "<empty>" } else { DEFAULT_BOOK_FILE }
         ));
         send("option name EvalFile type string default <empty>");
+        send("option name SyzygyPath type string default <empty>");
+        send(&format!(
+            "option name SyzygyPieces type spin default {} min {} max {}",
+            DEFAULT_SYZYGY_PIECES, MIN_SYZYGY_PIECES, MAX_SYZYGY_PIECES
+        ));
         send("uciok");
     }
 
@@ -379,6 +389,23 @@ impl Engine {
                         send(&format!("info string NNUE load failed ({}); using handcrafted evaluator", e));
                     }
                 }
+            }
+        } else if name.eq_ignore_ascii_case("SyzygyPath") {
+            let path = value.trim();
+            if path.is_empty() || path == "<empty>" {
+                tablebase::init("");
+                send("info string Syzygy tablebases disabled");
+            } else {
+                let n = tablebase::init(path);
+                if n > 0 {
+                    send(&format!("info string Syzygy: loaded {} table(s) from {}", n, path));
+                } else {
+                    send(&format!("info string Syzygy: no tables found in {}", path));
+                }
+            }
+        } else if name.eq_ignore_ascii_case("SyzygyPieces") {
+            if let Ok(n) = value.parse::<u32>() {
+                tablebase::set_piece_limit(n);
             }
         }
     }
@@ -575,8 +602,14 @@ fn print_info(info: &SearchInfo, pv_num: usize, multi_pv_total: usize) {
         String::new()
     };
 
+    let tbhits_field = if info.tbhits > 0 {
+        format!(" tbhits {}", info.tbhits)
+    } else {
+        String::new()
+    };
+
     send(&format!(
-        "info depth {} seldepth {}{} score {} nodes {} nps {} time {} hashfull {} pv {}",
+        "info depth {} seldepth {}{} score {} nodes {} nps {} time {} hashfull {}{} pv {}",
         info.depth,
         info.seldepth,
         multipv_field,
@@ -585,6 +618,7 @@ fn print_info(info: &SearchInfo, pv_num: usize, multi_pv_total: usize) {
         nps,
         info.time_ms,
         info.hashfull,
+        tbhits_field,
         if pv.is_empty() { "(none)".into() } else { pv.join(" ") },
     ));
 }

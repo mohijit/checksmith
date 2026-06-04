@@ -110,9 +110,10 @@ use super::ordering::{
 use super::see::see;
 use super::tt::{Bound, TranspositionTable};
 use super::{INFINITY, MATE, MATE_IN_MAX};
-use crate::board::{Board, PieceType};
+use crate::board::{Board, Color, PieceType};
 use crate::eval::evaluator::{Evaluator, HandcraftedEvaluator};
 use crate::movegen::Move;
+use crate::tablebase;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -217,6 +218,8 @@ pub struct Searcher<E: Evaluator = HandcraftedEvaluator> {
     pub check_extensions: u64,
     /// TT moves verified singular and extended by 1 ply.
     pub singular_extensions: u64,
+    /// Successful WDL tablebase probes that replaced the static evaluator.
+    pub tb_hits: u64,
 
     pub(crate) evaluator: E,
     killers: Killers,
@@ -280,6 +283,7 @@ impl<E: Evaluator> Searcher<E> {
             tt_cutoffs: 0,
             check_extensions: 0,
             singular_extensions: 0,
+            tb_hits: 0,
             evaluator,
             killers: Killers::new(),
             history: History::new(),
@@ -496,6 +500,38 @@ impl<E: Evaluator> Searcher<E> {
         // In that case we must not take TT cutoffs (the stored result was computed
         // without the move exclusion and would be wrong here).
         let is_se_search = self.se_excluded[ply as usize].is_some();
+
+        // --- Tablebase probe ---
+        //
+        // When the position has few enough pieces and the 50-move clock is at
+        // zero (just after an irreversible move), probe_wdl_after_zeroing gives
+        // the exact game-theoretic result without any search.
+        //
+        // We skip the probe inside SE verification searches to avoid polluting
+        // the narrow-window verification score.
+        if !is_se_search {
+            let limit = tablebase::piece_limit();
+            if limit > 0 && board.halfmove_clock == 0 {
+                let all = board.color(Color::White) | board.color(Color::Black);
+                if all.0.count_ones() <= limit {
+                    if let Some(wdl) = tablebase::probe_wdl(board) {
+                        self.tb_hits += 1;
+                        let tb_score = wdl.to_search_score();
+                        // Win/Loss: return immediately (exact, perfect play).
+                        // Effective draw: tighten alpha/beta to 0.
+                        if !wdl.is_effective_draw() {
+                            let bound = if tb_score > 0 { Bound::Lower } else { Bound::Upper };
+                            tt.store(board.hash, 200, score_to_tt(tb_score, ply), bound, None);
+                            return tb_score;
+                        }
+                        // Draw: score is 0; use it to tighten the window.
+                        if 0 >= beta { return 0; }
+                        if alpha < 0 { alpha = 0; }
+                        tt.store(board.hash, 200, 0, Bound::Exact, None);
+                    }
+                }
+            }
+        }
 
         // --- Transposition-table probe ---
         let mut tt_move = None;
