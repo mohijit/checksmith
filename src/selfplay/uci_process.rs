@@ -89,6 +89,14 @@ impl UciProcess {
 
     // ── Public API ────────────────────────────────────────────────────────────
 
+    /// Send a `setoption name N value V` command.
+    ///
+    /// Call this after [`launch`](Self::launch) but before [`new_game`](Self::new_game)
+    /// to configure engine-specific parameters (e.g., SPSA-perturbed values).
+    pub fn send_setoption(&mut self, name: &str, value: i32) -> std::io::Result<()> {
+        self.send(&format!("setoption name {} value {}", name, value))
+    }
+
     /// Signal the start of a new game and store `opening_fen` for subsequent
     /// [`get_move`](Self::get_move) calls.
     pub fn new_game(&mut self, opening_fen: &str) -> std::io::Result<()> {

@@ -238,6 +238,13 @@ impl Engine {
             "option name SyzygyPieces type spin default {} min {} max {}",
             DEFAULT_SYZYGY_PIECES, MIN_SYZYGY_PIECES, MAX_SYZYGY_PIECES
         ));
+        // SPSA-tunable search parameters.
+        for p in crate::search::params::ALL_PARAMS {
+            send(&format!(
+                "option name {} type spin default {} min {} max {}",
+                p.name, p.default, p.min, p.max
+            ));
+        }
         send("uciok");
     }
 
@@ -406,6 +413,14 @@ impl Engine {
         } else if name.eq_ignore_ascii_case("SyzygyPieces") {
             if let Ok(n) = value.parse::<u32>() {
                 tablebase::set_piece_limit(n);
+            }
+        } else if let Ok(v) = value.parse::<i32>() {
+            // SPSA-tunable search parameters: match by name.
+            for p in crate::search::params::ALL_PARAMS {
+                if name.eq_ignore_ascii_case(p.name) {
+                    (p.set)(v);
+                    break;
+                }
             }
         }
     }

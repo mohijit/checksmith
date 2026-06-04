@@ -20,6 +20,7 @@ pub mod draw;
 pub mod iterative;
 pub mod negamax;
 pub mod ordering;
+pub mod params;
 pub mod quiescence;
 pub mod see;
 pub mod smp;

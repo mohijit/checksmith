@@ -107,6 +107,7 @@ use super::ordering::{
     score_move, ContinuationHistory, CounterMoves, History, Killers,
     HISTORY_MAX, MAX_PLY, SCORE_COUNTER,
 };
+use super::params;
 use super::see::see;
 use super::tt::{Bound, TranspositionTable};
 use super::{INFINITY, MATE, MATE_IN_MAX};
@@ -133,45 +134,26 @@ const NMP_MIN_DEPTH: u32 = 3;
 
 // --- Futility pruning constants -----------------------------------------
 
-/// At depth 1 (frontier), skip quiet moves if static_eval + margin < alpha.
-const FUTILITY_MARGIN_1: i32 = 250; // ~minor piece
-/// At depth 2 (pre-frontier), skip quiet moves if static_eval + margin < alpha.
-const FUTILITY_MARGIN_2: i32 = 500; // ~rook
+// --- Futility pruning constants (runtime-configurable via params module) ---
+// FUTILITY_MARGIN_1, FUTILITY_MARGIN_2 → params::futility_margin_{1,2}()
+// RAZOR_MARGIN                          → params::razor_margin()
+// LMP_BASE                              → params::lmp_base()
+// PROBCUT_MARGIN                        → params::probcut_margin()
+// SE_DEPTH_FACTOR                       → params::se_depth_factor()
 
-// --- Razoring -----------------------------------------------------------
-
-/// At depth 1, if static_eval + margin is still below alpha, skip to
-/// quiescence.  A minor-piece margin keeps false prunes extremely rare.
-const RAZOR_MARGIN: i32 = 300;
-
-// --- Late Move Pruning (LMP) --------------------------------------------
+// --- Depth thresholds (compile-time; too coarse for gradient-based tuning) ---
 
 /// Maximum depth at which LMP is applied (inclusive).
 const LMP_MAX_DEPTH: u32 = 5;
 
-/// Base quiet-move count before LMP kicks in.
-/// Effective threshold = LMP_BASE + depth².
-const LMP_BASE: usize = 3;
-
-// --- ProbCut ------------------------------------------------------------
-
 /// Minimum depth to attempt ProbCut.
 const PROBCUT_MIN_DEPTH: u32 = 5;
-
-/// Raised beta margin: if a shallow search beats beta + this, prune.
-const PROBCUT_MARGIN: i32 = 200;
 
 /// Depth reduction for the ProbCut verification search.
 const PROBCUT_REDUCTION: u32 = 4;
 
-// --- Singular Extensions ------------------------------------------------
-
 /// Minimum depth at which a singular extension is considered.
 const SE_MIN_DEPTH: u32 = 6;
-
-/// Singular beta per ply: s_beta = tt_score − SE_DEPTH_FACTOR × depth.
-/// Smaller values → fewer (more conservative) extensions.
-const SE_DEPTH_FACTOR: i32 = 6;
 
 // -------------------------------------------------------------------------
 
@@ -610,7 +592,7 @@ impl<E: Evaluator> Searcher<E> {
         // quiescence.  Avoids generating and trying all quiet moves at the leaf.
         if depth == 1 && !in_check && !is_pv {
             let static_eval = self.evaluator.evaluate(board);
-            if static_eval + RAZOR_MARGIN < alpha {
+            if static_eval + params::razor_margin() < alpha {
                 return self.quiescence(board, alpha, beta, ply);
             }
         }
@@ -626,14 +608,14 @@ impl<E: Evaluator> Searcher<E> {
             && !in_check
             && beta.abs() < MATE_IN_MAX
         {
-            let pc_beta  = beta + PROBCUT_MARGIN;
+            let pc_beta  = beta + params::probcut_margin();
             let pc_depth = depth.saturating_sub(PROBCUT_REDUCTION);
             let pc_moves = board.legal_moves();
 
             for &mv in pc_moves.iter() {
                 if !mv.is_capture() { continue; }
                 // Only try captures that are likely to be worth at least pc_beta.
-                if see(board, mv) + PROBCUT_MARGIN < 0 { continue; }
+                if see(board, mv) + params::probcut_margin() < 0 { continue; }
 
                 self.move_stack[ply as usize] = Some(mv);
                 self.hash_history.push(board.hash);
@@ -709,7 +691,7 @@ impl<E: Evaluator> Searcher<E> {
         // Conditions: not PV node, not in check (forced moves can never be skipped).
         let futility_base = if !is_pv && !in_check && depth <= 2 {
             let eval = self.evaluator.evaluate(board);
-            let margin = if depth == 1 { FUTILITY_MARGIN_1 } else { FUTILITY_MARGIN_2 };
+            let margin = if depth == 1 { params::futility_margin_1() } else { params::futility_margin_2() };
             Some(eval + margin)
         } else {
             None
@@ -750,7 +732,7 @@ impl<E: Evaluator> Searcher<E> {
                 && depth <= LMP_MAX_DEPTH
                 && !mv.is_capture()
                 && !mv.is_promotion()
-                && i >= LMP_BASE + (depth * depth) as usize
+                && i >= params::lmp_base() + (depth * depth) as usize
                 && best > -INFINITY
             {
                 continue;
@@ -775,7 +757,7 @@ impl<E: Evaluator> Searcher<E> {
                         && tt_d as u32 >= depth.saturating_sub(3)
                         && tt_sc.abs() < MATE_IN_MAX
                     {
-                        let s_beta = (tt_sc - SE_DEPTH_FACTOR * depth as i32)
+                        let s_beta = (tt_sc - params::se_depth_factor() * depth as i32)
                             .max(-MATE_IN_MAX + 1);
                         let se_depth = depth / 2;
                         // Exclude this move and recurse on the same board/ply.

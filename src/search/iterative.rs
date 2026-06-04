@@ -151,8 +151,6 @@ pub fn think(
     // --- Aspiration window constants ---
     // Only used from this depth onward; shallow searches have volatile scores.
     const ASPIRATION_MIN_DEPTH: u32 = 4;
-    // Initial window half-width in centipawns (~half a pawn).
-    const ASPIRATION_DELTA: i32 = 50;
 
     let mut best = SearchResult {
         best_move: None,
@@ -178,7 +176,7 @@ pub fn think(
         // fall back to a full-window search — scores are too volatile to window reliably.
         let (mv, score) = if depth >= ASPIRATION_MIN_DEPTH && best.depth > 0 {
             let prev = best.score;
-            let mut delta = ASPIRATION_DELTA;
+            let mut delta = super::params::asp_delta();
             let mut lo = (prev - delta).max(-INFINITY);
             let mut hi = (prev + delta).min(INFINITY);
             loop {

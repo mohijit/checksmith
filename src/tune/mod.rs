@@ -26,6 +26,7 @@
 pub mod datagen;
 pub mod dataset;
 pub mod params;
+pub mod spsa;
 pub mod texel;
 
 pub use params::{compute_trace, EvalParams, EvalTrace, N_PARAMS};

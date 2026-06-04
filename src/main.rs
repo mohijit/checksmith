@@ -16,6 +16,7 @@
 //!   checksmith match [games] [depth]        # internal self-play regression match
 //!   checksmith datagen <games> <d> <out>    # generate self-play training positions
 //!   checksmith tune <positions.txt> [iters] # Texel-tune evaluation parameters
+//!   checksmith tune-spsa [games] [iters]    # SPSA search-parameter tuning
 
 use checksmith::board::{Board, STARTING_FEN};
 use checksmith::search::{is_mate_score, mate_distance_plies, search};
@@ -39,8 +40,9 @@ fn main() {
         }
         Some("verify")  => checksmith::debug::run_verify(&args[2..]),
         Some("match")   => checksmith::selfplay::run_match(&args[2..]),
-        Some("datagen") => checksmith::tune::run_datagen(&args[2..]),
-        Some("tune")    => checksmith::tune::run_tune(&args[2..]),
+        Some("datagen")   => checksmith::tune::run_datagen(&args[2..]),
+        Some("tune")      => checksmith::tune::run_tune(&args[2..]),
+        Some("tune-spsa") => checksmith::tune::spsa::run_spsa_command(&args[2..]),
         // Back-compat: a bare FEN argument prints the position.
         Some(_) => run_show(&args[1..]),
     }

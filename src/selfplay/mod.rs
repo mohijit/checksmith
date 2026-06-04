@@ -360,6 +360,12 @@ impl ExternalEngine {
     pub fn launch(path: &str) -> std::io::Result<Self> {
         Ok(ExternalEngine { process: UciProcess::launch(path)? })
     }
+
+    /// Wrap an already-initialised `UciProcess` (e.g. one that has had
+    /// setoptions applied before the first game).
+    pub fn from_process(process: UciProcess) -> Self {
+        ExternalEngine { process }
+    }
 }
 
 impl ChessEngine for ExternalEngine {
