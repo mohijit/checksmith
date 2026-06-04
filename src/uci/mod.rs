@@ -6,9 +6,9 @@
 //!
 //! ```text
 //! > uci
-//! < id name Checksmith 0.1.0
+//! < id name Checksmith 0.9.0
 //! < id author Checksmith contributors
-//! < option name Hash type spin default 16 min 1 max 1024
+//! < option name Hash type spin default 256 min 1 max 1024
 //! < option name Move Overhead type spin default 30 min 0 max 5000
 //! < option name Threads type spin default 1 min 1 max <cpu_count>
 //! < option name Clear Hash type button
@@ -79,7 +79,7 @@ const AUTHOR: &str = "Checksmith contributors";
 
 // ── Option ranges ─────────────────────────────────────────────────────────────
 
-const DEFAULT_HASH_MB: usize  = 16;
+const DEFAULT_HASH_MB: usize  = 256;
 const MIN_HASH_MB: usize      = 1;
 const MAX_HASH_MB: usize      = 1024;
 
