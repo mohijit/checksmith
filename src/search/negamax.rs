@@ -63,6 +63,27 @@
 //! * The move is a killer (proved good at the same ply in another line).
 //! * `depth < 3` or `move_index < 2` (too shallow to be meaningful).
 //!
+//! ## Razoring
+//!
+//! At depth 1, if the static evaluation plus a margin is still below alpha,
+//! the position is unlikely to raise alpha — fall straight through to
+//! quiescence rather than generating and searching all quiet moves.
+//!
+//! ## Late Move Pruning (LMP)
+//!
+//! At low depths, after searching the first N quiet moves, the remaining ones
+//! are very unlikely to raise alpha and can be skipped entirely.  Unlike LMR
+//! (which reduces depth), LMP discards moves outright.  Only applied at
+//! non-PV nodes and when not in check.
+//!
+//! ## ProbCut
+//!
+//! Before the main move loop, try each capture whose SEE exceeds a raised
+//! threshold (beta + PROBCUT_MARGIN) at a sharply reduced depth.  If any
+//! scores above that threshold, the full-depth search would too — prune
+//! the node immediately.  This is especially powerful at depths ≥ 5 where
+//! it replaces many expensive sub-trees with a cheap scout.
+//!
 //! ## Transposition table
 //!
 //! Every node probes the [`TranspositionTable`]: a deep-enough stored result
@@ -74,6 +95,7 @@ use super::ordering::{
     score_move, ContinuationHistory, CounterMoves, History, Killers,
     HISTORY_MAX, MAX_PLY, SCORE_COUNTER,
 };
+use super::see::see;
 use super::tt::{Bound, TranspositionTable};
 use super::{INFINITY, MATE, MATE_IN_MAX};
 use crate::board::{Board, PieceType};
@@ -102,6 +124,32 @@ const NMP_MIN_DEPTH: u32 = 3;
 const FUTILITY_MARGIN_1: i32 = 250; // ~minor piece
 /// At depth 2 (pre-frontier), skip quiet moves if static_eval + margin < alpha.
 const FUTILITY_MARGIN_2: i32 = 500; // ~rook
+
+// --- Razoring -----------------------------------------------------------
+
+/// At depth 1, if static_eval + margin is still below alpha, skip to
+/// quiescence.  A minor-piece margin keeps false prunes extremely rare.
+const RAZOR_MARGIN: i32 = 300;
+
+// --- Late Move Pruning (LMP) --------------------------------------------
+
+/// Maximum depth at which LMP is applied (inclusive).
+const LMP_MAX_DEPTH: u32 = 5;
+
+/// Base quiet-move count before LMP kicks in.
+/// Effective threshold = LMP_BASE + depth².
+const LMP_BASE: usize = 3;
+
+// --- ProbCut ------------------------------------------------------------
+
+/// Minimum depth to attempt ProbCut.
+const PROBCUT_MIN_DEPTH: u32 = 5;
+
+/// Raised beta margin: if a shallow search beats beta + this, prune.
+const PROBCUT_MARGIN: i32 = 200;
+
+/// Depth reduction for the ProbCut verification search.
+const PROBCUT_REDUCTION: u32 = 4;
 
 // -------------------------------------------------------------------------
 
@@ -480,6 +528,58 @@ impl<E: Evaluator> Searcher<E> {
             }
         }
 
+        // --- Razoring ---
+        //
+        // At depth 1, if the static eval plus a safety margin is still below
+        // alpha, a quiet search is unlikely to help — fall straight through to
+        // quiescence.  Avoids generating and trying all quiet moves at the leaf.
+        if depth == 1 && !in_check && !is_pv {
+            let static_eval = self.evaluator.evaluate(board);
+            if static_eval + RAZOR_MARGIN < alpha {
+                return self.quiescence(board, alpha, beta, ply);
+            }
+        }
+
+        // --- ProbCut ---
+        //
+        // Before the main search, try captures that SEE clearly above beta.
+        // A shallow null-window search at (depth − PROBCUT_REDUCTION) confirms
+        // the cutoff cheaply.  If any capture scores above (beta + margin) at
+        // that reduced depth, the full search would too.
+        if !is_pv
+            && depth >= PROBCUT_MIN_DEPTH
+            && !in_check
+            && beta.abs() < MATE_IN_MAX
+        {
+            let pc_beta  = beta + PROBCUT_MARGIN;
+            let pc_depth = depth.saturating_sub(PROBCUT_REDUCTION);
+            let pc_moves = board.legal_moves();
+
+            for &mv in pc_moves.iter() {
+                if !mv.is_capture() { continue; }
+                // Only try captures that are likely to be worth at least pc_beta.
+                if see(board, mv) + PROBCUT_MARGIN < 0 { continue; }
+
+                self.move_stack[ply as usize] = Some(mv);
+                self.hash_history.push(board.hash);
+                let undo = board.make_move(mv);
+                let score =
+                    -self.negamax(board, pc_depth, -pc_beta, -pc_beta + 1, ply + 1, false, tt);
+                board.unmake_move(mv, undo);
+                self.hash_history.pop();
+
+                if self.stopped { return 0; }
+
+                if score >= pc_beta {
+                    // Record as a lower bound at the reduced depth so the main
+                    // search can skip re-exploring this node.
+                    tt.store(board.hash, pc_depth,
+                             score_to_tt(score, ply), Bound::Lower, Some(mv));
+                    return score;
+                }
+            }
+        }
+
         // --- Move generation ---
         let mut moves = board.legal_moves();
         if moves.is_empty() {
@@ -562,6 +662,20 @@ impl<E: Evaluator> Searcher<E> {
                 {
                     continue;
                 }
+            }
+
+            // Late Move Pruning: at low depth, once we have searched enough
+            // quiet moves, the remaining ones are very unlikely to raise alpha.
+            // Captures and promotions are always searched.
+            if !is_pv
+                && !in_check
+                && depth <= LMP_MAX_DEPTH
+                && !mv.is_capture()
+                && !mv.is_promotion()
+                && i >= LMP_BASE + (depth * depth) as usize
+                && best > -INFINITY
+            {
+                continue;
             }
 
             // Record the move at this ply so the child can look up continuation
